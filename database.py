@@ -2,8 +2,7 @@ import sqlite3
 from pathlib import Path
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-import random
-
+from typing import TypedDict
 
 database_path = Path(__file__).parent / 'database.db'
 _connection = sqlite3.connect(database_path)
@@ -94,8 +93,26 @@ class BudgetItems:
         _connection.commit()
 
     @staticmethod
-    def all() -> list[dict]:
-        return _connection.execute('select * from budget_items').fetchall() or []
+    def all(month: int, year: int) -> list[dict]:
+        return _connection.execute("""
+        select 
+            c.id,
+            c.name,
+            b.month,
+            b.year,
+            b.category_id,
+            b.budgeted_amount,
+            coalesce(sum(t.amount), 0) as total_spent
+        from categories c
+        left join budget_items b on c.id = b.category_id 
+            and b.month = ? and b.year = ?
+        left join transactions t on c.id = t.category_id 
+            and strftime('%m', t.date) = ? 
+            and strftime('%Y', t.date) = ?
+        group by c.id, c.name, b.month, b.year, b.category_id, b.budgeted_amount
+        order by c.name
+        """,
+        (month, year, f'{month:02d}', f'{year:04d}')).fetchall() or []
 
     @staticmethod
     def delete(month: int, year: int, category_id: int) -> None:
@@ -106,7 +123,6 @@ class BudgetItems:
         _connection.commit()
 
 
-@dataclass
 class Categories:
 
     @staticmethod
@@ -148,7 +164,6 @@ class Categories:
         _connection.commit()
 
 
-@dataclass
 class Payees:
 
     @staticmethod
@@ -187,7 +202,17 @@ class Payees:
         _connection.commit()
 
 
-@dataclass
+class TransactionPayload(TypedDict):
+    account_id: int
+    transfer_from_id: int
+    payee_id: int
+    category_id: int
+    amount: int
+    notes: str
+    is_cleared: bool
+    date_: datetime
+
+
 class Transactions:
 
     @staticmethod
