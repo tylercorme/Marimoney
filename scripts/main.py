@@ -1,6 +1,6 @@
 import marimo
 
-__generated_with = "0.24.0"
+__generated_with = "0.24.2"
 app = marimo.App(width="full")
 
 
@@ -8,23 +8,20 @@ app = marimo.App(width="full")
 def _():
     import marimo as mo
     from datetime import datetime, timedelta
-    from importlib import reload
-    from dataclasses import dataclass
-
-    from database import Accounts, Transactions, Categories, BudgetItems
+    from typing import Callable, NamedTuple
     from transaction_parsers import make_parser, get_institutions
+    from importlib import reload
+    reload(__import__("setup"))
+    from setup import get_connection
 
 
-    return (
-        Accounts,
-        Categories,
-        Transactions,
-        datetime,
-        get_institutions,
-        make_parser,
-        mo,
-        timedelta,
-    )
+    return datetime, get_connection, mo
+
+
+@app.cell
+def _(get_connection):
+    conn = get_connection()
+    return (conn,)
 
 
 @app.cell(hide_code=True)
@@ -49,7 +46,7 @@ def _(datetime, mo, refresh):
 
 
 @app.cell(hide_code=True)
-def _(balances, header, mo, net_worth):
+def _(account_name_to_balance, header, mo, net_worth):
     mo.sidebar(
         mo.vstack([
             header,
@@ -60,7 +57,7 @@ def _(balances, header, mo, net_worth):
                 """),
             mo.hstack([mo.md("**All**"), mo.md(f"${net_worth:_.2f}")]),
             mo.md("---"),
-            *[mo.hstack([mo.md(f"**{account["name"]}**"), mo.md(f"${account["current_balance"]:_.2f}")]) for account in balances]
+            *[mo.hstack([mo.md(f"**{_name}**"), mo.md(f"${_balance:_.2f}")]) for _name, _balance in account_name_to_balance.items()]
         ]).center(),
     )
     return
@@ -68,118 +65,171 @@ def _(balances, header, mo, net_worth):
 
 @app.cell
 def _(mo):
-    get_account_state, set_account_state = mo.state(None)
-    return get_account_state, set_account_state
+    get_account_state, fetch_account_state = mo.state(None)
+    return fetch_account_state, get_account_state
 
 
 @app.cell
-def _(Accounts, get_account_state, mo):
+def _(conn, get_account_state, mo):
     get_account_state()
 
+    _accounts = conn.execute("""
+        select id, name, start_balance, on_budget from accounts order by name
+    """).fetchall() or []
+    account_name_to_id = {_id: _name for _id, _name, _, _ in _accounts}
 
-    account_name = mo.ui.text(label="Name", placeholder="Account Name")
-    start_balance = mo.ui.number(start=0.0, value=0.0, label="Start Balance")
-    on_budget = mo.ui.checkbox(label="On Budget", value=True)
+    account_table_data = [
+        {
+            "Id": _id,
+            "Name": mo.ui.text(value=_name),
+            "Start Balance": mo.ui.number(value=float(_start_balance)/100.0, debounce=True),
+            "On Budget": mo.ui.checkbox(value=bool(_on_budget)),
+        } for _id, _name, _start_balance, _on_budget in _accounts
+    ]
+    account_table = mo.ui.table(
+            account_table_data,
+            show_search=False, 
+            initial_selection=list(range(len(account_table_data)))
+    )
+
+    new_account_name = mo.ui.text(label="Name", placeholder="Account Name")
+    new_start_balance = mo.ui.number(start=0.0, value=0.0, label="Start Balance")
+    new_on_budget = mo.ui.checkbox(label="On Budget", value=True)
     new_account_button = mo.ui.button(label="Add Account", value=False, on_click=lambda _: True)
-
-
-    balances = Accounts.balances()
-    net_worth = sum([account["current_balance"] for account in balances])
-    account_name_to_id = {account["name"]: account["id"] for account in balances}
-
-    account_name_fields = mo.ui.array([mo.ui.text(value=account["name"]) for account in balances])
-    start_balance_fields = mo.ui.array([mo.ui.number(start=0.0, value=float(account["start_balance"])/100.0) for account in balances])
-    on_budget_fields = mo.ui.array([mo.ui.checkbox(value=bool(account["on_budget"])) for account in balances])
-    account_update_buttons = mo.ui.array([mo.ui.button(kind="success", value=0, on_click=lambda value: value + 1, label="Update") for account in balances])
-    account_delete_buttons = mo.ui.array([mo.ui.button(kind="danger", value=0, on_click=lambda value: value + 1, label="Delete") for account in balances])
+    add_new_account_form = mo.hstack([new_account_name, new_start_balance, new_on_budget, new_account_button])
+    delete_selected_accounts_button = mo.ui.button(kind="danger", label="Delete", value=False, on_click=lambda _: True)
+    commit_selected_accounts_button = mo.ui.button(kind="success", label="Commit", value=False, on_click=lambda _: True)
     return (
-        account_delete_buttons,
-        account_name,
-        account_name_fields,
-        account_name_to_id,
-        account_update_buttons,
-        balances,
-        net_worth,
+        account_table,
+        add_new_account_form,
+        commit_selected_accounts_button,
+        delete_selected_accounts_button,
         new_account_button,
-        on_budget,
-        on_budget_fields,
-        start_balance,
-        start_balance_fields,
+        new_account_name,
+        new_on_budget,
+        new_start_balance,
     )
 
 
 @app.cell
+def _(mo):
+    get_account_error_state, set_account_error_state = mo.state(None)
+    return get_account_error_state, set_account_error_state
+
+
+@app.cell
+def _(conn, get_account_state):
+    get_account_state()
+
+    _balances = conn.execute("""
+        select 
+        a.name,
+        a.start_balance / 100.0 + coalesce(sum(t.amount), 0) / 100.0 as current_balance
+        from accounts a
+        left join transactions t on a.id = t.account_id
+        group by a.id, a.name, a.start_balance, a.on_budget
+        order by a.name
+    """).fetchall() or []
+
+    account_name_to_balance = {_name: _balance for _name, _balance in _balances}
+    net_worth = sum([_balance for _, _balance in _balances])
+    return account_name_to_balance, net_worth
+
+
+@app.cell
 def _(
-    account_delete_buttons,
-    account_name,
-    account_name_fields,
-    account_update_buttons,
-    balances,
+    account_table,
+    add_new_account_form,
+    commit_selected_accounts_button,
+    delete_selected_accounts_button,
+    get_account_error_state,
+    get_account_state,
     mo,
-    new_account_button,
-    on_budget,
-    on_budget_fields,
-    start_balance,
-    start_balance_fields,
 ):
+    flag: mo.Html | None
+    if get_account_error_state():
+        flag = mo.md(get_account_error_state()).callout("danger")
+    elif get_account_state():
+        flag = mo.md(get_account_state()).callout("success")
+    else:
+        flag = None
+
     mo.vstack([
         mo.md("# Accounts"),
         mo.md("---"),
-        *[
-            mo.hstack([
-                account_name_fields[i], 
-                start_balance_fields[i], 
-                on_budget_fields[i],
-                account_update_buttons[i],
-                account_delete_buttons[i],
-            ]).left() for i, _ in enumerate(balances)
-        ],
-        mo.hstack([account_name, start_balance, on_budget, new_account_button]).left(),           
+        account_table,
+        add_new_account_form.left(),           
+        mo.hstack([delete_selected_accounts_button, commit_selected_accounts_button]).left() if account_table.value else "",
+        flag,
     ])
     return
 
 
 @app.cell
 def _(
-    Accounts,
-    account_delete_buttons,
-    account_name,
-    account_name_fields,
-    account_update_buttons,
-    balances,
+    account_table,
+    commit_selected_accounts_button,
+    conn,
+    delete_selected_accounts_button,
+    fetch_account_state,
     new_account_button,
-    on_budget,
-    on_budget_fields,
-    set_account_state,
-    start_balance,
-    start_balance_fields,
+    new_account_name,
+    new_on_budget,
+    new_start_balance,
+    set_account_error_state,
 ):
-    if new_account_button.value and account_name.value:
-        Accounts.insert(
-            account_name.value,
-            int(start_balance.value*100),
-            bool(on_budget.value)
-        )
-        set_account_state(lambda _: None)
+    if delete_selected_accounts_button.value:
+        for _account in account_table.value:
+            conn.execute(
+                """
+                delete from accounts where id = ?
+                """,
+                (_account["Id"],)
+            )
+        conn.commit()
+        fetch_account_state(f"Successfully deleted.")
+        set_account_error_state(None)
 
-    for _account, _name, _start_balance, _on_budget, _update in zip(
-        balances,
-        account_name_fields.value,
-        start_balance_fields.value,
-        on_budget_fields.value,
-        account_update_buttons.value,
-    ):
-        if _update:
-            Accounts.update(_account["id"], _name, int(_start_balance*100), _on_budget)
-            set_account_state(lambda _: None)
+    if commit_selected_accounts_button.value:
+        try:
+            for _account in account_table.value:
+                conn.execute(
+                    "update accounts set name = ?, start_balance = ?, on_budget = ? where id = ?",
+                    (
+                        _account["Name"].value,
+                        int(_account["Start Balance"].value*100), 
+                        bool(_account["On Budget"].value),
+                        _account["Id"]
+                    )
+                )
+            conn.commit()
+            fetch_account_state(f"Successfully updated.")
+            set_account_error_state(None)
+        except Exception as e:
+            set_account_error_state(repr(e))
+            conn.rollback()
 
-    for _account, _delete in zip(
-        balances,
-        account_delete_buttons.value,
-    ):
-        if _delete:
-            Accounts.delete(_account["id"])
-            set_account_state(lambda _: None)
+
+    if new_account_button.value and new_account_name.value:
+        try:
+            conn.execute(
+                """
+                insert into accounts (name, start_balance, on_budget) values (?,?,?)
+                """,
+                (
+                    new_account_name.value,
+                    int(new_start_balance.value*100),
+                    bool(new_on_budget.value)
+                )
+            )
+            conn.commit()
+            fetch_account_state("Successfully Created.")
+            set_account_error_state(None)
+        except Exception as e:
+            set_account_error_state(repr(e))
+            conn.rollback()
+    
+ 
     return
 
 
@@ -248,7 +298,7 @@ def _(account_name_to_id, get_import_state, get_institutions, mo):
     get_import_state()
     statement_files = mo.ui.file(
         filetypes=(".csv",),
-        multiple=True, 
+        multiple=True,
         label="Statements",
         kind="area",
     )
@@ -335,13 +385,13 @@ def _(
     set_account_state,
 ):
     if commit_transactions.value:
-        for ( _transfer_account, 
-             _category,  
+        for ( _transfer_account,
+             _category,
              _notes, raw_transaction) in zip(raw_transaction_transfer_account_fields,
                             raw_transaction_category_fields,
-                            raw_transaction_note_fields, 
+                            raw_transaction_note_fields,
                             raw_transactions
-        ): 
+        ):
             _account_id = import_account_select.value
             Transactions.insert(
                 _account_id,
@@ -380,7 +430,7 @@ def _(
             statement_files,
             *[
                 mo.hstack([
-                    raw_transaction_date_fields[i], 
+                    raw_transaction_date_fields[i],
                     raw_transaction_transfer_account_fields[i],
                     raw_transaction_note_fields[i],
                     raw_transaction_category_fields[i],
@@ -534,7 +584,7 @@ def _(budget_items, budget_month, budget_year, categories, mo):
     ])
 
     _spent    = mo.ui.array([
-     mo.ui.number(disabled=True, value=float(_item["total_spent"])/100.0) for _items in budget_items   
+     mo.ui.number(disabled=True, value=float(_item["total_spent"])/100.0) for _items in budget_items
     ])
 
     _balance  = mo.ui.array([
@@ -560,6 +610,7 @@ def _(budget_items, budget_month, budget_year, categories, mo):
         ]
     )
     return
+
 
 
 if __name__ == "__main__":
