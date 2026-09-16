@@ -1,18 +1,13 @@
 import sqlite3
 from pathlib import Path
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from typing import TypedDict
+
+
+
 
 database_path = Path(__file__).parent / 'database.db'
 _connection = sqlite3.connect(database_path)
-_connection.row_factory = sqlite3.Row
 
 
-class Accounts:
-
-    @staticmethod
-    def create_table():
         _connection.execute("""
         create table if not exists accounts (
             id integer primary key,
@@ -164,55 +159,6 @@ class Categories:
         _connection.commit()
 
 
-class Payees:
-
-    @staticmethod
-    def create_table() -> None:
-        _connection.execute("""
-            create table if not exists payees (
-                id integer primary key,
-                name text not null
-            );
-        """)
-
-    @staticmethod
-    def insert(name) -> int:
-        result = _connection.execute(
-            'insert into payees (name) values (?) returning id',
-            (name,)
-        ).fetchone()
-        _connection.commit()
-        return result[0]
-
-    @staticmethod
-    def update(id_: int, name: str) -> None:
-        _connection.execute(
-            'update payees set name = ? where id = ?',
-            (name, id_)
-        )
-        _connection.commit()
-
-    @staticmethod
-    def all() -> list[dict]:
-        return _connection.execute('select * from payees').fetchall() or []
-
-    @staticmethod
-    def delete(id_: int) -> None:
-        _connection.execute('delete from payees where id = ?', (id_,))
-        _connection.commit()
-
-
-class TransactionPayload(TypedDict):
-    account_id: int
-    transfer_from_id: int
-    payee_id: int
-    category_id: int
-    amount: int
-    notes: str
-    is_cleared: bool
-    date_: datetime
-
-
 class Transactions:
 
     @staticmethod
@@ -222,12 +168,11 @@ class Transactions:
                 id integer primary key,
                 account_id integer not null references accounts(id) on delete cascade,
                 transfer_from_id integer references accounts(id),
-                payee_id integer references payees(id) on delete set null,
                 category_id integer references categories(id) on delete set null,
                 amount integer not null,
                 notes text,
-                is_cleared integer default 0,
-                date datetime not null
+                date datetime not null,
+                status integer not null default 0,
             );
         """)
 
@@ -235,20 +180,22 @@ class Transactions:
     def insert(
             account_id: int,
             transfer_from_id: int,
-            payee_id: int,
             category_id: int,
             amount: int,
             notes: str,
-            is_cleared: bool,
             date_: datetime
     ) -> int:
         result = _connection.execute(
             '''insert into transactions 
-               (account_id, transfer_from_id, payee_id, category_id, amount, notes, is_cleared, date)
+               (account_id, transfer_from_id, category_id, amount, notes, date)
                values (?, ?, ?, ?, ?, ?, ?, ?) returning id''',
-            (account_id, transfer_from_id, payee_id, category_id,
-             amount, notes, is_cleared,
-             datetime.combine(date_, datetime.min.time()).isoformat())
+            (
+                account_id,
+                transfer_from_id,
+                category_id,
+                amount,
+                notes,
+                datetime.combine(date_, datetime.min.time()).isoformat())
         ).fetchone()
         return result["id"]
 
@@ -257,27 +204,30 @@ class Transactions:
             id_: int,
             account_id: int,
             transfer_from_id: int,
-            payee_id: int,
             category_id: int,
             amount: int,
             notes: str,
-            is_cleared: bool,
-            date_: datetime
+            date_: datetime,
+            status: int,
     ) -> None:
         _connection.execute("""
             update transactions set 
             account_id = ?, 
             transfer_from_id = ?, 
-            payee_id = ?, 
             category_id = ?, 
             amount = ?, 
             notes = ?, 
-            is_cleared = ?, 
-            date = ? where id = ?
+            date = ?,
+            status = ? where id = ?
             """,
-            (account_id, transfer_from_id, payee_id, category_id,
-             amount, notes, is_cleared,
-             datetime.combine(date_, datetime.min.time()).isoformat(), id_)
+            (account_id,
+             transfer_from_id,
+             category_id,
+             amount,
+             notes,
+             datetime.combine(date_, datetime.min.time()).isoformat(),
+             status,
+             id_)
         )
 
     @staticmethod
@@ -332,13 +282,19 @@ class Transactions:
         return rows or []
 
 
-def create_tables(db_path: Path) -> None:
-    Payees.create_table()
-    Accounts.create_table()
-    Categories.create_table()
-    BudgetItems.create_table()
-    Transactions.create_table()
+def main() -> None:
+    _connection.execute("""
+    create table if not exists accounts (
+        id integer primary key,
+        name text unique not null,
+        start_balance integer default 0,
+        on_budget integer not null,
+        created_at datetime default current_timestamp
+    );
+    """)
+
 
 
 if __name__ == '__main__':
-    create_tables(database_path)
+    main()
+
