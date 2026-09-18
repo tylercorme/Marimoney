@@ -7,7 +7,7 @@ app = marimo.App(width="full")
 @app.cell
 def _():
     import marimo as mo
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, date
     from transaction_parsers import make_parser, get_institutions
     from importlib import reload
     reload(__import__("setup"))
@@ -15,6 +15,7 @@ def _():
 
 
     return (
+        date,
         datetime,
         get_connection,
         get_institutions,
@@ -118,7 +119,7 @@ def _(
             conn.rollback()
         finally:
             update_balances()
-    
+
 
     def _update_start_budget(v, id_):
         try:
@@ -346,7 +347,6 @@ def _(account_name_to_id, datetime, mo, timedelta):
         value = account_name_to_id.keys(),
     )
 
-
     transaction_filters = mo.hstack([transactions_from, transactions_to, transaction_account_select])
     return (
         transaction_account_select,
@@ -453,17 +453,22 @@ def _(
 
 @app.cell
 def _(mo, transaction_filters, transaction_table):
-    unconfirm_button = mo.ui.run_button(label="Uncomfirm", kind="warn")
+    unconfirm_button = mo.ui.run_button(label="Move to Review", kind="neutral")
+    delete_transactions_button = mo.ui.run_button(label="Delete", kind="danger")
+
     confirmed_transaction_view = mo.vstack(
         [
             transaction_filters.left(),
             transaction_table,
-            unconfirm_button if transaction_table.value else ""
+            mo.hstack([unconfirm_button, delete_transactions_button]).left() if transaction_table.value else "",
         ]
     )
 
-
-    return confirmed_transaction_view, unconfirm_button
+    return (
+        confirmed_transaction_view,
+        delete_transactions_button,
+        unconfirm_button,
+    )
 
 
 @app.cell
@@ -495,7 +500,6 @@ def _(
         join accounts a on t.account_id = a.id
         where t.status = 0
         order by t.date desc
-        limit 20
     """).fetchall()
 
     unconfirmed_transaction_ids = [_id for _id, *_ in _transactions]
@@ -530,14 +534,26 @@ def _(
             mo.md("Notes"),
             mo.md("Category"),
             mo.md("Amount"),
-            mo.md("")
         ],
         widths="equal"
     )
 
-    confirm_transaction_buttons = mo.ui.array([
-        mo.ui.run_button(kind="success", label="Confirm") for _ in range(len(unconfirmed_transaction_ids))
-    ])
+    confirm_all_transactions_button = mo.ui.run_button(kind="success", label="Confirm All")
+    bulk_edit_account_from          = mo.ui.dropdown(options=account_name_to_id)
+    bulk_edit_notes                 = mo.ui.text()
+    bulk_edit_category              = mo.ui.dropdown(options=category_name_to_id, searchable=True)
+
+    bulk_edit_fields = mo.hstack(
+        [
+            mo.ui.date(disabled=True),
+            mo.ui.dropdown(options=account_name_to_id, disabled=True),
+            bulk_edit_account_from,
+            bulk_edit_notes,
+            bulk_edit_category,
+            mo.ui.number(disabled=True),
+        ],
+        widths="equal"
+    )
 
     unconfirmed_transaction_fields = [
         mo.hstack(
@@ -552,6 +568,7 @@ def _(
                 on_change=lambda v, __id=_id: _update_transfer_from(v, __id)
             ),
             mo.ui.text(
+                value=_notes,
                 on_change=lambda v, __id=_id: _update_notes(v, __id)
             ),
             mo.ui.dropdown(
@@ -563,21 +580,33 @@ def _(
                 disabled=True, 
                 value=float(_amount/100.0),
             ),
-                confirm_transaction_buttons[i]
             ],
             widths="equal",
-        ) for i, (_id, _date, _account_name, _, _, _, _amount) in enumerate(_transactions)
+        ) for _id, _date, _account_name, _, _notes, _, _amount in _transactions
     ]
 
+    CHUNK_SIZE = 20
     unconfirmed_transaction_view = mo.vstack(
         [
-            unconfirmed_transaction_header,
-            *unconfirmed_transaction_fields,
         
+            unconfirmed_transaction_header, # tbd make sticky?
+            bulk_edit_fields,
+            confirm_all_transactions_button.left(),
+            mo.md("---"),
+            mo.accordion(
+                {
+                    f"Transactions {i} to {i+CHUNK_SIZE}" : 
+                    mo.vstack(unconfirmed_transaction_fields[i:i + CHUNK_SIZE])
+                    for i in range(0, len(unconfirmed_transaction_fields), CHUNK_SIZE)
+                }
+            ),
         ],
     )
     return (
-        confirm_transaction_buttons,
+        bulk_edit_account_from,
+        bulk_edit_category,
+        bulk_edit_notes,
+        confirm_all_transactions_button,
         num_transactions_need_review,
         unconfirmed_transaction_ids,
         unconfirmed_transaction_view,
@@ -616,8 +645,8 @@ def _(account_name_to_id, get_institutions, mo):
 
 @app.cell
 def _(
-    amount,
     conn,
+    fetch_unconfirmed_transactions,
     import_account_select,
     make_parser,
     set_import_error_message,
@@ -637,31 +666,36 @@ def _(
         try:
             for _amount, _notes, _date in raw_transactions:
                 conn.execute(
-                    "insert into transactions (account_id, notes, amount, date)",
+                    "insert into transactions (account_id, notes, amount, date, status) values (?, ?, ?, ?, 1)",
                     (
                         int(import_account_select.value),
                         _notes, 
-                        int(amount*100), 
+                        int(_amount*100), 
                         _date.isoformat()
                     )
                 )
             conn.commit()
             set_import_success_message(f"Successfully imported {len(raw_transactions)} transactions.")
             set_import_error_message(None)
+            fetch_unconfirmed_transactions(None)
         except Exception as e:
             conn.rollback()
             set_import_success_message(None)
             set_import_error_message(repr(e))
-        
     
+
     return
 
 
 @app.cell
 def _(
-    confirm_transaction_buttons,
+    bulk_edit_account_from,
+    bulk_edit_category,
+    bulk_edit_notes,
+    confirm_all_transactions_button,
     confirmed_transaction_view,
     conn,
+    delete_transactions_button,
     fetch_confirmed_transactions,
     fetch_unconfirmed_transactions,
     import_flag: "mo.md | None",
@@ -679,7 +713,7 @@ def _(
             mo.md("---"),
             mo.md(
                 f"{num_transactions_need_review} transactions awaiting review."
-            ).callout("warn"),
+            ).callout("warn") if num_transactions_need_review else "",
             mo.accordion({
                 "Import Transactions": 
                 mo.vstack([transaction_import.left(), import_flag if import_flag else ""])
@@ -688,17 +722,43 @@ def _(
                 {
                     "Needs Review": unconfirmed_transaction_view,
                     "Confirmed": confirmed_transaction_view,
-                }
+                },
+                on_change=lambda v: fetch_confirmed_transactions(None) if v=="Confirmed" else None
             ) if num_transactions_need_review else confirmed_transaction_view,
-        
+    
         ]
     )
 
-    for _id, _confirm_button in zip(unconfirmed_transaction_ids, confirm_transaction_buttons):
-        if _confirm_button.value:
-            conn.execute("update transactions set status = 1 where id = ?", (_id,))
+    if confirm_all_transactions_button.value:
+        _account_from = bulk_edit_account_from.value
+        _notes = bulk_edit_notes.value
+        _category = bulk_edit_category.value
+        try:
+            for _id in unconfirmed_transaction_ids:
+                if _account_from:
+                    conn.execute(
+                        "update transactions set account_from_id = ? where id = ?",
+                        (_account_from, _id,)
+                    )
+                if _notes:
+                     conn.execute(
+                        "update transactions set notes = ? where id = ?",
+                        (_notes, _id,)
+                    )               
+                if _category:
+                    conn.execute(
+                        "update transactions set category_id = ? where id = ?",
+                        (_category, _id,)
+                    )
+            
+                conn.execute("update transactions set status = 1 where id = ?", (_id,))
             conn.commit()
-            fetch_unconfirmed_transactions(0)
+            
+        except:
+            conn.rollback()
+        finally:
+            fetch_confirmed_transactions(None)
+
 
     if unconfirm_button.value:
         try:
@@ -711,29 +771,25 @@ def _(
         except:
             conn.rollback()
         finally:
-            fetch_confirmed_transactions()
-    
+            fetch_confirmed_transactions(None)
+            fetch_unconfirmed_transactions(None)
+
+    if delete_transactions_button.value:
+        try:
+            for t in transaction_table.value:
+                conn.execute(
+                    "delete from transactions where id = ?",
+                    (t["Id"],)
+                )
+            conn.commit()
+        except:
+            conn.rollback()
+        finally:
+            fetch_confirmed_transactions(None)
+
 
     _transactions
     return
-
-
-@app.cell
-def _(conn):
-    import random
-    from datetime import date
-
-    for _ in range(1000):
-        conn.execute(
-            "insert into transactions (account_id, amount, date) values (?,?,?)",
-            (
-             random.randint(1,5),
-             random.randint(-1000,10000), 
-             date(2026, 9, random.randint(1,28)).isoformat()
-            )
-        )
-    conn.commit()
-    return (date,)
 
 
 @app.cell
@@ -957,6 +1013,29 @@ def _(
             *budget_table_data,
             new_category_form.left(),
             budget_flag,
+            mo.accordion(
+                {
+                    "Suggested Categories":
+                    mo.md(
+                        """
+                        - Income
+                        - Insurance
+                        - Phone
+                        - Dining Out
+                        - Travel
+                        - Gas
+                        - Groceries
+                        - Gifts
+                        - Fun
+                        - Groceries
+                        - Savings
+                        - To Budget
+                        - Student Loans
+                        - Investments
+                        """
+                    )
+                }
+            ),
             mo.md("# Report"),
             mo.md("---"),
         ]

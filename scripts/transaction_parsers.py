@@ -116,7 +116,7 @@ class CapitalOne:
 class CollinsCommunityCreditUnion:
 
     @staticmethod
-    def parser(contents: str) -> list[ParsedTransaction]:
+    def parse(contents: str) -> list[ParsedTransaction]:
         lines = contents.splitlines()
         if not lines:
             return []
@@ -128,18 +128,14 @@ class CollinsCommunityCreditUnion:
 
         transactions = []
         for row in reader:
-            amount = -float(str(row["Amount"]))
+            amount = float(str(row["Amount"]).replace("$","").replace(',',''))
 
-            # TODO: inject logic to parse into custom categories based on Description, Amount, Etc.
-            category = row["Category"]
 
-            # TODO: inject logic to grab account id if there's matching transaction
-
-            date_ = date.strptime(row["Transaction Date"], r"%Y-%m-%d")
+            date_ = date.strptime(row["Date"], r"%m/%d/%Y")
             description = re.sub(r"\s+", " ", row["Description"])
             transactions.append(
                 ParsedTransaction(
-                    amount=float(amount),
+                    amount=amount,
                     notes=description,
                     date_=date_,
                 )
