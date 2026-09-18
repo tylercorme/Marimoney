@@ -7,9 +7,7 @@ transaction schema.
 import re
 import csv
 from datetime import date
-from decimal import Decimal
-from typing import Protocol
-from database import TransactionPayload
+from typing import Protocol, NamedTuple
 
 
 def camel_to_words(camel_case_str):
@@ -18,11 +16,16 @@ def camel_to_words(camel_case_str):
     return result.title()
 
 
+class ParsedTransaction(NamedTuple):
+    amount: float
+    notes: str
+    date_: date
+
+
 class Parser(Protocol):
     @staticmethod
-    def parse(contents: str) -> list[TransactionPayload]:
+    def parse(contents: str) -> list[ParsedTransaction]:
         ...
-
 
 _AVAILABLE_INSTITUTIONS: dict[str, type[Parser]] = {}
 
@@ -36,9 +39,9 @@ def register(parser: type[Parser]):
 
 
 @register
-class Chase(Parser):
+class Chase:
     @staticmethod
-    def parse(contents: str) -> list[TransactionPayload]:
+    def parse(contents: str) -> list[ParsedTransaction]:
         lines = contents.splitlines()
         if not lines:
             return []
@@ -60,13 +63,9 @@ class Chase(Parser):
             date_ = date.strptime(row["Transaction Date"], r"%m/%d/%Y")
             description = re.sub(r"\s+", " ", row["Description"])
             transactions.append(
-                dict(
-                    transfer_from_id=None,
-                    payee_id=None,
-                    category_id=None,
+                ParsedTransaction(
                     amount=float(amount),
                     notes=description,
-                    is_cleared=False,
                     date_=date_,
                 )
             )
@@ -75,9 +74,9 @@ class Chase(Parser):
 
 
 @register
-class CapitalOne(Parser):
+class CapitalOne:
     @staticmethod
-    def parse(contents: str) -> list[TransactionPayload]:
+    def parse(contents: str) -> list[ParsedTransaction]:
         lines = contents.splitlines()
         if not lines:
             return []
@@ -104,13 +103,9 @@ class CapitalOne(Parser):
             date_ = date.strptime(row["Transaction Date"], r"%Y-%m-%d")
             description = re.sub(r"\s+", " ", row["Description"])
             transactions.append(
-                dict(
-                    transfer_from_id=None,
-                    payee_id=None,
-                    category_id=None,
+                ParsedTransaction(
                     amount=float(amount),
                     notes=description,
-                    is_cleared=False,
                     date_=date_,
                 )
             )
@@ -118,10 +113,10 @@ class CapitalOne(Parser):
         return transactions
 
 @register
-class CollinsCommunityCreditUnion(Parser):
+class CollinsCommunityCreditUnion:
 
     @staticmethod
-    def parser(contents: str):
+    def parser(contents: str) -> list[ParsedTransaction]:
         lines = contents.splitlines()
         if not lines:
             return []
@@ -143,18 +138,15 @@ class CollinsCommunityCreditUnion(Parser):
             date_ = date.strptime(row["Transaction Date"], r"%Y-%m-%d")
             description = re.sub(r"\s+", " ", row["Description"])
             transactions.append(
-                dict(
-                    transfer_from_id=None,
-                    payee_id=None,
-                    category_id=None,
+                ParsedTransaction(
                     amount=float(amount),
                     notes=description,
-                    is_cleared=False,
                     date_=date_,
                 )
             )
 
         return transactions
+
 
 def make_parser(institution: str) -> type[Parser]:
     return _AVAILABLE_INSTITUTIONS[institution]
