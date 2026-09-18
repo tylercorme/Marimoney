@@ -160,9 +160,9 @@ def _(
 
     accounts_header = mo.hstack(
         [
-            mo.md("Name"),
-            mo.md("Start Budget"),
-            mo.md("On Budget"),
+            mo.md("**Name**"),
+            mo.md("**Start Budget**"),
+            mo.md("**On Budget**"),
             mo.md(""), # save room for delete button
         ],
         widths="equal",                   
@@ -279,6 +279,7 @@ def _(
         mo.md("---"),
         accounts_header,
         *account_fields,
+        mo.md("---"),
         add_new_account_form,
         account_flag,
 
@@ -418,13 +419,13 @@ def _(
             t.id,
             t.date,
             a.name,
-            a_transfer.name,
+            ta.name,
             t.notes,
             c.name,
             t.amount
         from transactions t
         join accounts a on t.account_id = a.id
-        left join accounts a_transfer on a_transfer.id = t.transfer_from_id
+        left join accounts ta on ta.id = t.transfer_from_id
         left join categories c on c.id = t.category_id
         where t.account_id in ({placeholders})
         {date_clause} and t.status = 1
@@ -463,7 +464,6 @@ def _(mo, transaction_filters, transaction_table):
             mo.hstack([unconfirm_button, delete_transactions_button]).left() if transaction_table.value else "",
         ]
     )
-
     return (
         confirmed_transaction_view,
         delete_transactions_button,
@@ -492,11 +492,13 @@ def _(
             t.id,
             t.date,
             a.name,
-            t.transfer_from_id,
+            ta.name,
             t.notes,
-            t.category_id,
+            c.name,
             t.amount
         from transactions t
+        left join accounts ta on t.transfer_from_id = ta.name
+        left join categories c on c.id = t.category_id
         join accounts a on t.account_id = a.id
         where t.status = 0
         order by t.date desc
@@ -528,17 +530,17 @@ def _(
 
     unconfirmed_transaction_header = mo.hstack(
         [
-            mo.md("Date"),
-            mo.md("Account"),
-            mo.md("From"),
-            mo.md("Notes"),
-            mo.md("Category"),
-            mo.md("Amount"),
+            mo.md("**Date**"),
+            mo.md("**Account**"),
+            mo.md("**From**"),
+            mo.md("**Notes**"),
+            mo.md("**Category**"),
+            mo.md("**Amount**"),
         ],
         widths="equal"
     )
 
-    confirm_all_transactions_button = mo.ui.run_button(kind="success", label="Confirm All")
+
     bulk_edit_account_from          = mo.ui.dropdown(options=account_name_to_id)
     bulk_edit_notes                 = mo.ui.text()
     bulk_edit_category              = mo.ui.dropdown(options=category_name_to_id, searchable=True)
@@ -564,6 +566,7 @@ def _(
             ),
             mo.ui.text(disabled=True, value=_account_name),
             mo.ui.dropdown(
+                value=_transfer,
                 options=account_name_to_id,
                 on_change=lambda v, __id=_id: _update_transfer_from(v, __id)
             ),
@@ -572,6 +575,7 @@ def _(
                 on_change=lambda v, __id=_id: _update_notes(v, __id)
             ),
             mo.ui.dropdown(
+                value=_category,
                 options=category_name_to_id,
                 searchable=True,
                 on_change=lambda v, __id=_id: _update_category(v, __id)
@@ -582,13 +586,32 @@ def _(
             ),
             ],
             widths="equal",
-        ) for _id, _date, _account_name, _, _notes, _, _amount in _transactions
+        ) for _id, _date, _account_name, _transfer, _notes, _category, _amount in _transactions
     ]
+    return (
+        bulk_edit_account_from,
+        bulk_edit_category,
+        bulk_edit_fields,
+        bulk_edit_notes,
+        num_transactions_need_review,
+        unconfirmed_transaction_fields,
+        unconfirmed_transaction_header,
+        unconfirmed_transaction_ids,
+    )
 
+
+@app.cell
+def _(
+    bulk_edit_fields,
+    mo,
+    unconfirmed_transaction_fields,
+    unconfirmed_transaction_header,
+):
+    confirm_all_transactions_button = mo.ui.run_button(kind="success", label="Confirm All")
     CHUNK_SIZE = 20
     unconfirmed_transaction_view = mo.vstack(
         [
-        
+
             unconfirmed_transaction_header, # tbd make sticky?
             bulk_edit_fields,
             confirm_all_transactions_button.left(),
@@ -602,15 +625,7 @@ def _(
             ),
         ],
     )
-    return (
-        bulk_edit_account_from,
-        bulk_edit_category,
-        bulk_edit_notes,
-        confirm_all_transactions_button,
-        num_transactions_need_review,
-        unconfirmed_transaction_ids,
-        unconfirmed_transaction_view,
-    )
+    return confirm_all_transactions_button, unconfirmed_transaction_view
 
 
 @app.cell
@@ -682,8 +697,6 @@ def _(
             conn.rollback()
             set_import_success_message(None)
             set_import_error_message(repr(e))
-    
-
     return
 
 
@@ -723,9 +736,9 @@ def _(
                     "Needs Review": unconfirmed_transaction_view,
                     "Confirmed": confirmed_transaction_view,
                 },
-                on_change=lambda v: fetch_confirmed_transactions(None) if v=="Confirmed" else None
+                on_change=lambda v: fetch_confirmed_transactions(None)
             ) if num_transactions_need_review else confirmed_transaction_view,
-    
+
         ]
     )
 
@@ -737,7 +750,7 @@ def _(
             for _id in unconfirmed_transaction_ids:
                 if _account_from:
                     conn.execute(
-                        "update transactions set account_from_id = ? where id = ?",
+                        "update transactions set transfer_from_id = ? where id = ?",
                         (_account_from, _id,)
                     )
                 if _notes:
@@ -750,13 +763,14 @@ def _(
                         "update transactions set category_id = ? where id = ?",
                         (_category, _id,)
                     )
-            
+
                 conn.execute("update transactions set status = 1 where id = ?", (_id,))
             conn.commit()
-            
-        except:
+        except Exception as  e:
             conn.rollback()
+            print(e)
         finally:
+            fetch_unconfirmed_transactions(None)
             fetch_confirmed_transactions(None)
 
 
@@ -773,6 +787,7 @@ def _(
         finally:
             fetch_confirmed_transactions(None)
             fetch_unconfirmed_transactions(None)
+
 
     if delete_transactions_button.value:
         try:
@@ -796,7 +811,7 @@ def _(
 def _(mo):
     get_budget_state, set_budget_state = mo.state(0)
     get_budget_error_state, set_budget_error_state = mo.state(0)
-    get_budget_items, fetch_budget_items = mo.state(0)
+    get_budget_items, fetch_budget_items = mo.state(0, allow_self_loops=True)
     return (
         fetch_budget_items,
         get_budget_error_state,
@@ -852,6 +867,7 @@ def _(
     budget_month,
     budget_year,
     conn,
+    fetch_budget_items,
     get_budget_items,
     mo,
     set_budget_error_state,
@@ -867,6 +883,7 @@ def _(
             select 
                 c.id,
                 c.name,
+                c.is_income,
                 b.budgeted_amount,
                 coalesce(sum(t.amount), 0) as total_spent
             from categories c
@@ -876,11 +893,11 @@ def _(
                 and strftime('%m', t.date) = ? 
                 and strftime('%Y', t.date) = ?
             group by c.id, c.name, b.month, b.year, b.category_id, b.budgeted_amount
-            order by c.name
+            order by c.is_income desc, c.name 
             """,
             (_month, _year, f'{_month:02d}', f'{_year:04d}')).fetchall()
     category_name_to_id = {
-        _name: _id for _id, _name, _, _ in _budget_items
+        _name: _id for _id, _name, *_ in _budget_items
     }
 
 
@@ -892,6 +909,33 @@ def _(
             return a / 100.0
         return (a - b) / 100.0
 
+    def _update_is_income(v, id_):
+        try:
+            conn.execute(
+                """
+                update categories
+                set is_income = ?
+                where id = ?
+                """,
+                (int(v), id_)
+            )
+            if v:
+                conn.execute(
+                    """
+                    update budget_items
+                    set budgeted_amount = 0
+                    where category_id = ?
+                    """,
+                    (id_,)
+                )
+            conn.commit()
+            set_budget_state(f"Successfully updated.")
+            set_budget_error_state(None)
+        except Exception as e:
+            conn.rollback()
+            set_budget_error_state(repr(e))
+        finally:
+            fetch_budget_items(None)
 
     def _update_name(v, id_):
         try:
@@ -909,6 +953,8 @@ def _(
         except Exception as e:
             conn.rollback()
             set_budget_error_state(repr(e))
+        finally:
+            fetch_budget_items(None)
 
 
     def _update_budget(v, id_):
@@ -933,6 +979,8 @@ def _(
         except Exception as e:
             conn.rollback()
             set_budget_error_state(repr(e))
+        finally:
+            fetch_budget_items(None)
 
 
     category_ids = [
@@ -945,26 +993,52 @@ def _(
     ])
 
     budget_table_data = [
-            mo.hstack([
-            mo.ui.text(
-                _name,
-                on_change=lambda v, __id=_id: _update_name(v, __id)
-            ),
-            mo.ui.number(
-                value=_clean(_budgeted),
-                on_change=lambda v, __id=_id: _update_budget(v, __id)
-            ),
-            mo.ui.number(disabled=True, value=_clean(_spent)),
-            mo.ui.number(disabled=True, value=_clean(_budgeted, _spent)),
-            category_delete_buttons[i],
-        ], widths="equal") for i, (_id, _name, _budgeted, _spent) in enumerate(_budget_items)
+        mo.hstack(
+            [
+                mo.ui.checkbox(
+                    value=bool(_is_income),
+                    on_change=lambda v, __id=_id: _update_is_income(v, __id)
+                ),
+                mo.ui.text(
+                    _name,
+                    on_change=lambda v, __id=_id: _update_name(v, __id)
+                ),
+                mo.ui.number(
+                    value=_clean(_budgeted) if not bool(_is_income) else 0.0,
+                    disabled=bool(_is_income),
+                    on_change=lambda v, __id=_id: _update_budget(v, __id)
+                ),
+                mo.ui.number(disabled=True, value=_clean(_spent)),
+                mo.ui.number(disabled=True, value=_clean(_budgeted, _spent)),
+                category_delete_buttons[i],
+            ], 
+            widths="equal"
+        ) for i, (_id, _name, _is_income, _budgeted, _spent) in enumerate(_budget_items)
     ]
+
+    _total_budgeted = sum((_budgeted or 0) for _, _, _is_income, _budgeted, _spent in _budget_items if not _is_income)
+    _total_spent = sum(_spent for _, _, _, _, _spent in _budget_items)
+    _total_balance = _total_budgeted - _total_spent
+
+    budget_totals_row = mo.hstack(
+        [
+            mo.md(""),
+            mo.md("**Total**"),
+            mo.ui.number(disabled=True, value=_clean(_total_budgeted)),
+            mo.ui.number(disabled=True, value=_clean(_total_spent)),
+            mo.ui.number(disabled=True, value=_clean(_total_budgeted, _total_spent)),
+            mo.md(""),
+        ],
+        widths="equal"
+    )
 
     budget_header = mo.hstack(
         [
+
+            mo.md("**Income**"),
             mo.md("**Name**"),
             mo.md("**Budgeted**"),
-            mo.md("**Spent**"),
+            mo.md("**Actual**"),
             mo.md("**Balance**"),
             mo.md("")
         ], 
@@ -972,16 +1046,19 @@ def _(
     )
 
     new_category_name = mo.ui.text(value="", placeholder="New Category")
+    new_category_is_income = mo.ui.checkbox()
     add_category_button = mo.ui.run_button(label="Add Category")
-    new_category_form = mo.hstack([new_category_name, add_category_button])
+    new_category_form = mo.hstack([new_category_is_income, new_category_name, add_category_button])
     return (
         add_category_button,
         budget_header,
         budget_table_data,
+        budget_totals_row,
         category_delete_buttons,
         category_ids,
         category_name_to_id,
         new_category_form,
+        new_category_is_income,
         new_category_name,
     )
 
@@ -993,6 +1070,7 @@ def _(
     budget_header,
     budget_month,
     budget_table_data,
+    budget_totals_row,
     budget_year,
     category_delete_buttons,
     category_ids,
@@ -1000,6 +1078,7 @@ def _(
     fetch_budget_items,
     mo,
     new_category_form,
+    new_category_is_income,
     new_category_name,
     set_budget_error_state,
     set_budget_state,
@@ -1011,6 +1090,8 @@ def _(
             mo.md("---"),
             budget_header,
             *budget_table_data,
+            budget_totals_row,
+            mo.md("---"),
             new_category_form.left(),
             budget_flag,
             mo.accordion(
@@ -1044,8 +1125,8 @@ def _(
     if new_category_name.value and add_category_button.value:
         try:    
             conn.execute(
-                """insert into categories (name) values (?)""",
-                (new_category_name.value,)
+                """insert into categories (name, is_income) values (?,?)""",
+                (new_category_name.value,new_category_is_income.value)
             )
             conn.commit()
             set_budget_state("Successfully added.")

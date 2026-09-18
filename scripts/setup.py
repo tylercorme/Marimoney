@@ -17,7 +17,8 @@ def get_connection() -> sqlite3.Connection:
         
         create table if not exists categories (
             id integer primary key,
-            name text unique not null
+            name text unique not null,
+            is_income integer not null default 0
         );
         
         create table if not exists budget_items (
