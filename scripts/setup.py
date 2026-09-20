@@ -33,13 +33,24 @@ def get_connection() -> sqlite3.Connection:
         create table if not exists transactions (
             id integer primary key,
             account_id integer not null references accounts(id) on delete cascade,
-            transfer_from_id integer references accounts(id) on delete set null,
+            transfer_account_id integer references accounts(id) on delete set null,
             category_id integer references categories(id) on delete set null,
             amount integer not null default 0,
             notes text,
-            date datetime not null,
-            status integer not null default 0
+            date date not null,
+            count int not null default 1,
+            imported_date date not null default current_timestamp,
+            status integer not null default 0,
+            created_at datetime default current_timestamp,
+            original_json json not null,
+            unique(original_json, count)
+            check (transfer_account_id != account_id)
         ); 
+        
+        create table if not exists settings (
+            key text primary key,
+            value text not null
+        );
     """)
     conn.commit()
     return conn
