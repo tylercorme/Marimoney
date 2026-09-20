@@ -9,7 +9,7 @@ def _():
     import marimo as mo
     from datetime import datetime, timedelta, date
     from traceback import TracebackException
-    from hashlib import sha256
+    from collections import Counter
     import sqlite3
     import json
 
@@ -19,6 +19,7 @@ def _():
 
 
     return (
+        Counter,
         TracebackException,
         date,
         datetime,
@@ -27,8 +28,6 @@ def _():
         json,
         mo,
         reload,
-        sha256,
-        sqlite3,
         timedelta,
     )
 
@@ -700,6 +699,7 @@ def _(account_name_to_id, get_institutions, mo):
 
 @app.cell
 def _(
+    Counter,
     TracebackException,
     conn,
     get_parser,
@@ -707,8 +707,6 @@ def _(
     json,
     set_import_error_message,
     set_import_success_message,
-    sha256,
-    sqlite3,
     statement_files,
     statement_type,
     update_balances,
@@ -725,35 +723,28 @@ def _(
             raw_transactions.extend(_parse(file.contents.decode()))
 
         try:
-            skip_count = 0
+            _seen = Counter()
+            _inserted = 0
+            _skipped = 0
+            _account_id = int(import_account_select.value)
             for _amount, _notes, _date in raw_transactions:
-
-                _count = 1
-                _hash = sha256(f"{_amount}{_notes}{_date}{_count}".encode())
-                while _hash in _hashes:
-                    _count += 1
-                    _hash = sha256(f"{_amount}{_notes}{_date}{_count}".encode())
-                _hashes.add(_hash)
-                try:
-                    conn.execute(
-                        "insert into transactions (account_id, notes, amount, date, count, status, original_json) values (?, ?, ?, ?, ?, 1, ?)",
-                        (
-                            int(import_account_select.value),
-                            _notes,
-                            int(round(_amount*100)),
-                            _date.isoformat(),
-                            _count,
-                            json.dumps({
-                                "amount":_amount,
-                                "notes":_notes,
-                                "date":_date.isoformat()
-                            })
-                        )
-                    )
-                except sqlite3.IntegrityError:
-                    skip_count += 1
+                _cents = round(_amount * 100)
+                _key = (_account_id, _date.isoformat(), _cents, _notes)
+    
+                _count = _seen[_key] + 1
+                _seen[_key] = _count
+    
+                _cursor = conn.execute(
+                    """insert or ignore into transactions
+                       (account_id, notes, amount, date, count, status, original_json)
+                       values (?, ?, ?, ?, ?, 1, ?)""",
+                    (_account_id, _notes, _cents, _date.isoformat(), _count,
+                     json.dumps({"amount": _amount, "notes": _notes, "date": _date.isoformat()})),
+                )
+                _inserted += _cursor.rowcount
+                _skipped += 1 - _cursor.rowcount
             conn.commit()
-            set_import_success_message(f"Successfully imported {len(raw_transactions)-skip_count} transactions. Skipped {skip_count}.")
+            set_import_success_message(f"Successfully imported {len(raw_transactions)-_skipped} transactions. Skipped {_skipped}.")
             set_import_error_message(None)
             update_confirmed_transactions(None)
             update_balances(None)
@@ -764,6 +755,7 @@ def _(
             set_import_error_message(_trace_message)
             set_import_success_message(None)
             conn.rollback()
+
     return
 
 
