@@ -9,9 +9,10 @@ import csv
 from datetime import date
 from typing import NamedTuple
 from collections.abc import Callable
+from decimal import Decimal
 
 class ParsedTransaction(NamedTuple):
-    amount: float
+    amount: Decimal
     notes: str
     date_: date
 
@@ -45,13 +46,13 @@ def _(contents: str) -> list[ParsedTransaction]:
 
     transactions = []
     for row in reader:
-        amount = float(str(row["Amount"]))
+        amount = Decimal(str(row["Amount"]))
         category = row["Category"]
         date_ = date.strptime(row["Transaction Date"], r"%m/%d/%Y")
         description = re.sub(r"\s+", " ", row["Description"])
         transactions.append(
             ParsedTransaction(
-                amount=float(amount),
+                amount=amount,
                 notes=description,
                 date_=date_,
             )
@@ -74,9 +75,9 @@ def _(contents: str) -> list[ParsedTransaction]:
     transactions = []
     for row in reader:
         if row["Debit"]:
-            amount = -float(str(row["Debit"]))
+            amount = -Decimal(str(row["Debit"]))
         elif row["Credit"]:
-            amount = +float(str(row["Credit"]))
+            amount = +Decimal(str(row["Credit"]))
         else:
             continue
 
@@ -85,7 +86,7 @@ def _(contents: str) -> list[ParsedTransaction]:
         description = re.sub(r"\s+", " ", row["Description"])
         transactions.append(
             ParsedTransaction(
-                amount=float(amount),
+                amount=amount,
                 notes=description,
                 date_=date_,
             )
@@ -107,7 +108,7 @@ def _(contents: str) -> list[ParsedTransaction]:
 
     transactions = []
     for row in reader:
-        amount = float(str(row["Amount"]).replace("$","").replace(',',''))
+        amount = Decimal(str(row["Amount"]).replace("$","").replace(',',''))
 
 
         date_ = date.strptime(row["Date"], r"%m/%d/%Y")

@@ -10,25 +10,21 @@ def _():
     from datetime import datetime, timedelta, date
     from traceback import TracebackException
     from collections import Counter
-    import sqlite3
     import json
 
     from importlib import reload
-    reload(__import__("transaction_parsers"))
-    from transaction_parsers import get_parser, get_institutions
-
+    import transactions
+    import budget
 
     return (
-        Counter,
         TracebackException,
+        budget,
         date,
         datetime,
-        get_institutions,
-        get_parser,
-        json,
         mo,
         reload,
         timedelta,
+        transactions,
     )
 
 
@@ -258,15 +254,25 @@ def _(conn, get_accounts, get_balances):
     get_accounts()
 
     _balances = conn.execute("""
-        select
+    select
         a.name,
         a.start_balance
-          + coalesce((select sum(t.amount) from transactions t
+          + coalesce((select sum(t.amount)
+                      from transactions t
                       where t.account_id = a.id), 0)
-          - coalesce((select sum(t.amount) from transactions t
-                      where t.transfer_account_id = a.id), 0) as current_balance
-        from accounts a
-        order by a.name
+          - coalesce((select sum(t.amount)
+                      from transactions t
+                      where t.transfer_account_id = a.id
+                        and not exists (
+                            select 1
+                            from transactions m
+                            where m.account_id = a.id
+                              and m.amount = -t.amount
+                              and abs(julianday(m.date) - julianday(t.date)) <= 7
+                        )), 0)
+          as current_balance
+    from accounts a
+    order by a.name
     """).fetchall() or []
 
     account_name_to_balance = {_name: to_money_str(_balance) for _name, _balance in _balances}
@@ -369,7 +375,7 @@ def _(
 
 
 @app.cell
-def _(account_name_to_id, datetime, mo, timedelta):
+def _(account_name_to_id, category_name_to_id, datetime, mo, timedelta):
     account_name_to_id
     transactions_from = mo.ui.date(
                 label = "From: ",
@@ -387,7 +393,13 @@ def _(account_name_to_id, datetime, mo, timedelta):
         value = account_name_to_id.keys(),
     )
 
-    transaction_filters = mo.hstack([transactions_from, transactions_to, transaction_account_select])
+    transaction_category_select = mo.ui.multiselect(
+        label = "Categories: ",
+        options = category_name_to_id,
+        value = list(category_name_to_id.keys()),
+    )
+
+    transaction_filters = mo.hstack([transactions_from, transactions_to, transaction_account_select, transaction_category_select])
     return (
         transaction_account_select,
         transaction_filters,
@@ -445,6 +457,7 @@ def _(
     params = []
     params.extend(_account_ids)
 
+
     date_clause = ""
     if _start_date:
         date_clause += " and t.date >= ?"
@@ -461,7 +474,8 @@ def _(
             ta.name,
             t.notes,
             c.name,
-            t.amount
+            t.amount,
+            t.created_at
         from transactions t
         join accounts a on t.account_id = a.id
         left join accounts ta on ta.id = t.transfer_account_id
@@ -473,6 +487,7 @@ def _(
 
     _transactions = [
         {
+            "Imported On": _created_at,
             "Id": _id,
             "Date": _date,
             "Account": _name,
@@ -480,13 +495,14 @@ def _(
             "Notes": _notes,
             "Category": _category,
             "Amount": float(_amount)/100.0
-        } for _id, _date, _name, _transfer, _notes, _category, _amount in _transactions
+        } for _id, _date, _name, _transfer, _notes, _category, _amount, _created_at in _transactions
     ]
 
     transaction_table = mo.ui.table(
         _transactions,
-        hidden_columns=["Id"] if _transactions else [],
-        pagination=False,
+        hidden_columns=["Id", "Imported On"] if _transactions else [],
+        pagination=True,
+        page_size=25,
     )
     return (transaction_table,)
 
@@ -668,7 +684,7 @@ def _(
 
 
 @app.cell
-def _(account_name_to_id, get_institutions, mo):
+def _(account_name_to_id, mo, transactions):
     # import transactions
     statement_files = mo.ui.file(
         filetypes=(".csv",),
@@ -676,7 +692,7 @@ def _(account_name_to_id, get_institutions, mo):
         label="Statements",
     )
 
-    supported_statements = get_institutions()
+    supported_statements = transactions.get_institutions()
     statement_type = mo.ui.dropdown(
         options=supported_statements,
         label="Institution: "
@@ -686,11 +702,16 @@ def _(account_name_to_id, get_institutions, mo):
         label="Account: "
     )
 
+    import_button = mo.ui.run_button(
+        label = "Import",
+    )
+
     transaction_import = mo.hstack([
-        statement_type, import_account_select, statement_files  
+        statement_type, import_account_select, statement_files, import_button,  
     ])
     return (
         import_account_select,
+        import_button,
         statement_files,
         statement_type,
         transaction_import,
@@ -699,52 +720,45 @@ def _(account_name_to_id, get_institutions, mo):
 
 @app.cell
 def _(
-    Counter,
     TracebackException,
     conn,
-    get_parser,
     import_account_select,
-    json,
+    import_button,
+    mo,
     set_import_error_message,
     set_import_success_message,
     statement_files,
     statement_type,
+    transactions,
     update_balances,
     update_confirmed_transactions,
 ):
-    raw_transactions = []
-    _hashes = set() # assume duplicate transaction statements can have valid transactions. If a hash is the same increment count.
-    if import_account_select.value and statement_type.value and statement_files.value:
-        _parse = get_parser(
-            statement_type.value
-        )
+    mo.stop(not import_button.value)
+    mo.stop(
+        not (import_account_select.value and statement_type.value and statement_files.value),
+        mo.md("Select an institution, account, and at least one file."),
+    )
 
-        for file in statement_files.value:
-            raw_transactions.extend(_parse(file.contents.decode()))
+    if import_button.value and import_account_select.value and statement_type.value and statement_files.value:
+        _parse = transactions.get_parser(statement_type.value)
 
         try:
-            _seen = Counter()
-            _inserted = 0
-            _skipped = 0
-            _account_id = int(import_account_select.value)
-            for _amount, _notes, _date in raw_transactions:
-                _cents = round(_amount * 100)
-                _key = (_account_id, _date.isoformat(), _cents, _notes)
-    
-                _count = _seen[_key] + 1
-                _seen[_key] = _count
-    
-                _cursor = conn.execute(
-                    """insert or ignore into transactions
-                       (account_id, notes, amount, date, count, status, original_json)
-                       values (?, ?, ?, ?, ?, 1, ?)""",
-                    (_account_id, _notes, _cents, _date.isoformat(), _count,
-                     json.dumps({"amount": _amount, "notes": _notes, "date": _date.isoformat()})),
+            _results: list[transactions.ImportResult] = []
+            for file in statement_files.value:
+                _results.append(
+                    transactions.import_(
+                        conn, 
+                        import_account_select.value, 
+                        _parse(file.contents.decode())
+                    )
                 )
-                _inserted += _cursor.rowcount
-                _skipped += 1 - _cursor.rowcount
-            conn.commit()
-            set_import_success_message(f"Successfully imported {len(raw_transactions)-_skipped} transactions. Skipped {_skipped}.")
+
+            set_import_success_message(
+                f"""
+                Successfully imported {sum(_inserted for _inserted, _ in _results)} transactions.
+                Skipped {sum(_skipped for _, _skipped in _results)}.
+                """
+            )
             set_import_error_message(None)
             update_confirmed_transactions(None)
             update_balances(None)
@@ -755,7 +769,6 @@ def _(
             set_import_error_message(_trace_message)
             set_import_success_message(None)
             conn.rollback()
-
     return
 
 
@@ -910,11 +923,16 @@ def _(conn, date, datetime, mo):
         value = datetime.now().year,
     )
 
+    budget_period_select = mo.hstack([budget_month, budget_year])
 
     def _update_start_date(v: date | None):
         if v:
             conn.execute(
-                "insert into settings (key, value) values ('budget_start', ?)",
+                """
+                insert into settings (key, value) values ('budget_start', ?)
+                on conflict (key)
+                do update set value = excluded.value
+                """,
                 (v.isoformat(),)
             )
             conn.commit()
@@ -928,7 +946,46 @@ def _(conn, date, datetime, mo):
     budget_settings = mo.accordion({
                 "Settings": budget_start_date.left()
     })
-    return budget_month, budget_settings, budget_start_date, budget_year
+    return (
+        budget_month,
+        budget_period_select,
+        budget_settings,
+        budget_start_date,
+        budget_year,
+    )
+
+
+@app.cell
+def _(
+    budget,
+    budget_month,
+    budget_start_date,
+    budget_year,
+    conn,
+    get_budget_items,
+    mo,
+):
+    get_budget_items()
+
+    copy_previous_months_budget_button = mo.ui.run_button(
+        label="Copy Previous Month's Budget"
+    )
+
+    monthly_budget = budget.load_budget(
+        conn, 
+        budget_year.value, 
+        budget_month.value, 
+        budget_start_date.value
+    )
+
+    category_name_to_id = {e.name: e.id for e in monthly_budget.envelopes}
+    category_ids = [e.id for e in monthly_budget.envelopes]
+    return (
+        category_ids,
+        category_name_to_id,
+        copy_previous_months_budget_button,
+        monthly_budget,
+    )
 
 
 @app.cell
@@ -942,181 +999,30 @@ def _(get_budget_error_state, get_budget_state, mo):
         budget_flag = mo.md(get_budget_state()).callout("success")
     else:
         budget_flag = ""
-    return
+    return (budget_flag,)
 
 
 @app.cell
 def _(
+    budget,
+    budget_flag: "mo.Html",
     budget_month,
-    budget_start_date,
-    budget_year,
-    conn,
-    date,
-    get_budget_items,
-    mo,
-):
-    get_budget_items()
-
-    copy_previous_months_budget_button = mo.ui.run_button(
-        label="Copy Previous Month's Budget"
-    )
-
-
-    _sql = """
-           with cat as (
-               select
-                   c.id, c.name, c.is_income,
-                   coalesce((select sum(b.budgeted_amount) from budget_items b
-                             where b.category_id = c.id
-                               and b.year * 12 + b.month < :year * 12 + :month), 0) as assigned_before,
-                   coalesce((select sum(b.budgeted_amount) from budget_items b
-                             where b.category_id = c.id
-                               and b.month = :month and b.year = :year), 0) as budgeted,
-                   coalesce((select sum(t.amount) from transactions t
-                             where t.category_id = c.id and t.status = 1
-                               and t.date >= :budget_start and t.date < :start), 0) as actual_before,
-                   coalesce((select sum(t.amount) from transactions t
-                             where t.category_id = c.id and t.status = 1
-                               and t.date >= :start and t.date < :end), 0) as actual
-               from categories c
-           )
-           select
-               id, name, is_income,
-               case when is_income then 0 else assigned_before + actual_before end as rollover,
-               budgeted,
-               actual,
-               case when is_income then null
-               else assigned_before + actual_before + budgeted + actual end as balance
-           from cat
-           order by is_income desc, name;
-           """
-
-    budget_items = []
-    to_budget = 0
-    if budget_month.value and budget_year.value:
-        _month = budget_month.value
-        _year = budget_year.value
-        _budget_start = budget_start_date.value.isoformat()
-
-        def month_bounds(month: int, year: int) -> tuple[str, str]:
-            start = date(year, month, 1)
-            end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
-            return start.isoformat(), end.isoformat()
-
-        _start, _end = month_bounds(_month, _year)
-        budget_items = conn.execute(
-            _sql,
-            {"month": _month, "year": _year, "start": _start, "end": _end, "budget_start":_budget_start},
-        ).fetchall()
-
-        to_budget = conn.execute(
-            """
-            select
-                coalesce((select sum(t.amount)
-                          from transactions t
-                          join categories c on c.id = t.category_id
-                          where c.is_income = 1 and t.status = 1
-                            and t.date < :end and t.date >= :budget_start), 0)
-              - coalesce((select sum(b.budgeted_amount)
-                          from budget_items b
-                          join categories c on c.id = b.category_id
-                          where c.is_income = 0
-                            and b.year * 12 + b.month <= :year * 12 + :month), 0)
-            """,
-            {"month": _month, "year": _year, "end": _end, "budget_start": _budget_start},
-        ).fetchone()[0]
-
-    category_name_to_id = {_name: _id for _id, _name, *_ in budget_items}
-    category_ids = [_id for _id, *_ in budget_items]
-    return (
-        budget_items,
-        category_ids,
-        category_name_to_id,
-        copy_previous_months_budget_button,
-        to_budget,
-    )
-
-
-@app.cell
-def _(
-    budget_items,
-    budget_month,
+    budget_period_select,
     budget_settings,
     budget_year,
     conn,
     copy_previous_months_budget_button,
     mo,
+    monthly_budget,
     set_budget_error_state,
     set_budget_state,
-    to_budget,
     update_budget_items,
 ):
-    budget_items
-    def _update_is_income(v, id_):
+    monthly_budget
+    def _save(action):
         try:
-            conn.execute(
-                """
-                update categories
-                set is_income = ?
-                where id = ?
-                """,
-                (int(v), id_)
-            )
-            if v:
-                conn.execute(
-                    """
-                    update budget_items
-                    set budgeted_amount = 0
-                    where category_id = ?
-                    """,
-                    (id_,)
-                )
-            conn.commit()
-            set_budget_state(f"Successfully updated.")
-            set_budget_error_state(None)
-            update_budget_items(None)
-        except Exception as e:
-            conn.rollback()
-            set_budget_error_state(repr(e))
-
-    def _update_name(v, id_):
-        try:
-            conn.execute(
-                """
-                update categories
-                set name = ?
-                where id = ?
-                """,
-                (v, id_)
-            )
-            conn.commit()
-            set_budget_state(f"Successfully updated.")
-            set_budget_error_state(None)
-            update_budget_items(None)
-        except Exception as e:
-            conn.rollback()
-            set_budget_error_state(repr(e))
-
-    def _update_budget(v, id_):
-        try:
-            if v is None:
-                v = 0.0
-            conn.execute(
-                """
-                insert into budget_items (month, year, category_id, budgeted_amount)
-                values (?, ?, ?, ?)
-                on conflict (month, year, category_id)
-                do update set budgeted_amount = excluded.budgeted_amount
-                """,
-                (
-                    budget_month.value,
-                    budget_year.value,
-                    id_,
-                    round(v * 100)
-                )
-            )
-            conn.commit()
-            set_budget_state(f"Successfully updated.")
+            action()
+            set_budget_state("Successfully updated.")
             set_budget_error_state(None)
             update_budget_items(None)
         except Exception as e:
@@ -1126,106 +1032,93 @@ def _(
     def _dollars(cents: int | None) -> float:
         return (cents or 0) / 100.0
 
-
     category_delete_buttons = mo.ui.array([
-        mo.ui.run_button(label="Delete", kind="danger") 
-        for _ in range(len(budget_items))
+        mo.ui.run_button(label="Delete", kind="danger")
+        for _ in monthly_budget.envelopes
+    ])
+    category_income_checks = mo.ui.array([
+        mo.ui.checkbox(
+            value=e.is_income,
+            on_change=lambda v, id_=e.id: _save(lambda: budget.set_is_income(conn,id_,v)),
+        )
+        for e in monthly_budget.envelopes
     ])
 
+    category_names = mo.ui.array([
+        mo.ui.text(
+            e.name,
+            on_change=lambda v, id_=e.id: _save(lambda: budget.rename_category(conn,id_,v)),
+        )
+        for e in monthly_budget.envelopes
+    ])
 
-    _income_actual = 0
-    _expense_actual = 0
-    _expense_assigned = 0  # only used to derive the pool rollover
-    _cum_balance = 0
-    _budget_rows = []
+    category_budgets = mo.ui.array([
+        mo.ui.number(
+            value=_dollars(e.display_budgeted),
+            disabled=e.is_income,
+            on_change=lambda v, id_=e.id: 
+            _save(
+                lambda: 
+                budget.set_budgeted(
+                    conn,
+                    budget_year.value,
+                    budget_month.value,
+                    id_, 
+                    budget.dollars_to_cents(v)
+                )
+            ),
+        )
+        for e in monthly_budget.envelopes
+    ])
 
-    for i, (_id, _name, _is_income, _rollover, _budgeted, _actual, _balance) in enumerate(budget_items):
-        if _is_income:
-            _income_actual += _actual
-            _budgeted = _actual
-            _balance = None
-        else:
-            _expense_actual += _actual
-            _expense_assigned += _budgeted
+    _rows = [
+        mo.hstack([
+            category_income_checks[i],
+            category_names[i],
+            category_budgets[i],
+            mo.ui.number(disabled=True, value=_dollars(e.actual)),
+            mo.ui.number(disabled=True, value=_dollars(e.balance))
+            if e.balance is not None
+            else mo.md(""),
+            category_delete_buttons[i],
+        ], widths="equal")
+        for i, e in enumerate(monthly_budget.envelopes)
+    ]
+    def _stat(label, cents):
+        return mo.stat(
+            value=to_money_str(cents),
+            label=label,
+            direction="increase" if cents >= 0 else "decrease",
+        )
 
-        if _balance is not None:
-            _cum_balance += _balance
+    _stats = mo.hstack([
+        mo.stat(
+            label="To Budget:", 
+            value=f"{to_money_str(monthly_budget.pool_rollover)} + {to_money_str(monthly_budget.income_actual - monthly_budget.expense_assigned)} = {to_money_str(monthly_budget.to_budget)}"
+        ),
+        _stat("Net Cash Flow", monthly_budget.net_actual),
+    ])
 
-        _budget_rows.append(mo.hstack([
-                mo.ui.checkbox(
-                    value=bool(_is_income),
-                    on_change=lambda v, __id=_id: _update_is_income(v, __id),
-                ),
-                mo.ui.text(
-                    _name,
-                    on_change=lambda v, __id=_id: _update_name(v, __id),
-                ),
-                mo.ui.number(
-                    value=_dollars(_budgeted),
-                    disabled=bool(_is_income),
-                    on_change=lambda v, __id=_id: _update_budget(v, __id),
-                ),
-                mo.ui.number(disabled=True, value=_dollars(_actual)),
-                (
-                    mo.ui.number(disabled=True, value=_dollars(_balance))
-                    if _balance is not None
-                    else mo.md("")
-                ),
-                category_delete_buttons[i],
-        ], widths="equal"))
-
-    _net_actual = _income_actual + _expense_actual
-    _pool_rollover = to_budget - _income_actual + _expense_assigned
-
-
-    _to_budget_stat = mo.stat(
-        # bordered=True,
-        value=to_money_str(to_budget),
-        label="To Budget:",
-        direction="increase" if to_budget >= 0 else "decrease",
-    )
-
-    _rollover_stat = mo.stat(
-        # bordered=True,
-        value=to_money_str(_pool_rollover),
-        label="Rollover",
-        direction="increase" if _pool_rollover >= 0 else "decrease",
-    )
-
-    _net_stat = mo.stat(
-        # bordered=True,
-        value=to_money_str(_net_actual),
-        label="Net Cash Flow",
-        direction="increase" if _net_actual >= 0 else "decrease",
-    )
-
-    _stats = mo.hstack([_to_budget_stat, _rollover_stat, _net_stat])
-
-
-    _budget_header = mo.hstack(
+    _header = mo.hstack(
         [
-            mo.md("**Income**"),
-            mo.md("**Name**"),
-            mo.md("**Budgeted**"),
-            mo.md("**Actual**"),
-            mo.md("**Balance**"),
+            mo.md(f"Income"), 
+            mo.md("Name"),
+            mo.md("Budgeted"),
+            mo.md("Actual"),
+            mo.md("Balance"),
             mo.md("")
-        ], 
-        widths="equal"
-    )
-
-
-    _budget_totals_row = mo.hstack(
-        [
-            mo.md(""),
-            mo.md("**Total**"),
-            mo.ui.number(disabled=True, value=_dollars(_income_actual - _expense_assigned)),
-            mo.ui.number(disabled=True, value=_dollars(_net_actual)),
-            mo.ui.number(disabled=True, value=_dollars(_cum_balance)),
-            mo.md(""),
         ],
         widths="equal",
     )
+
+    _totals = mo.hstack([
+        mo.md(""),
+        mo.md("**Total**"),
+        mo.ui.number(disabled=True, value=_dollars(monthly_budget.income_actual - monthly_budget.expense_assigned)),
+        mo.ui.number(disabled=True, value=_dollars(monthly_budget.net_actual)),
+        mo.ui.number(disabled=True, value=_dollars(monthly_budget.total_balance)),
+        mo.md(""),
+    ], widths="equal")
 
 
     new_category_name = mo.ui.text(value="", placeholder="New Category")
@@ -1233,23 +1126,19 @@ def _(
     add_category_button = mo.ui.run_button(label="Add Category")
     new_category_form = mo.hstack([new_category_is_income, new_category_name, add_category_button])
 
-
-    mo.vstack(
-        [
-            mo.md("# Budget"),
-            budget_settings,
-            mo.hstack([budget_month, budget_year]).left(),
-            copy_previous_months_budget_button.left(),
-            mo.md("---"),
-            _stats.center(),
-            _budget_header,
-            *_budget_rows,
-            new_category_form.left(),
-            # budget_flag,
-            mo.md("---"),
-            _budget_totals_row,
-        ]
-    )
+    mo.vstack([
+        mo.md("# Budget"),
+        budget_settings,
+        budget_period_select.left(),
+        copy_previous_months_budget_button,
+        mo.md("---"),
+        _stats.center(),
+        _header,
+        *_rows,
+        _totals,
+        new_category_form.left(),
+        budget_flag,
+    ])
     return (
         add_category_button,
         category_delete_buttons,
@@ -1325,6 +1214,102 @@ def _(
             update_budget_items(None)
         except Exception as e:
             set_budget_error_state(repr(e))
+    return
+
+
+@app.cell
+def _(budget_month, budget_year, mo, monthly_budget):
+    import plotly.graph_objects as go
+    from plotly.colors import qualitative
+    _expense = [e for e in monthly_budget.envelopes if not e.is_income]
+    _colors = {e.name: qualitative.Plotly[i % 10] for i, e in enumerate(_expense)}
+    _TO_BUDGET = "To Budget"
+    _colors["To Budget"] = "#9AA0A6"
+
+
+    def _pie(items, center_top, center_bottom):
+        if not items:
+            return mo.md("Nothing to show for this month.").callout("warn")
+        fig = go.Figure(go.Pie(
+            labels=[n for n, _ in items],
+            values=[c / 100 for _, c in items],
+            hole=0.62,
+            sort=False,
+            direction="clockwise",
+            textinfo="percent",
+            textposition="inside",
+            hovertemplate="<b>%{label}</b><br>$%{value:,.2f}<br>%{percent}<extra></extra>",
+        ))
+        fig.update_layout(
+            height=400,
+            margin=dict(t=50, b=10, l=10, r=10),
+            paper_bgcolor="rgba(0,0,0,0)",   # keep only if you want it to blend with the page
+            plot_bgcolor="rgba(0,0,0,0)",
+            legend=dict(x=1.02, y=0.5),
+            annotations=[dict(
+                text=f"<b style='font-size:22px'>{center_top}</b><br>{center_bottom}",
+                x=0.5, y=0.5, xref="paper", yref="paper",
+                showarrow=False, align="center",
+            )],
+        )
+        return fig
+
+
+    # Budgeted pie: this month's assignments + the unassigned remainder of the pool
+    _assigned = monthly_budget.expense_assigned
+    _to_budget = monthly_budget.to_budget
+    _budgeted_items = [(e.name, e.budgeted) for e in _expense if e.budgeted > 0]
+    if _to_budget > 0:
+        _budgeted_items.append((_TO_BUDGET, _to_budget))
+    _pool = _assigned + _to_budget  # money available to assign this month
+
+    # Spent pie: net spending per envelope
+    _spent_items = [(e.name, -e.actual) for e in _expense if e.actual < 0]
+    _total_spent = -monthly_budget.expense_actual
+
+    _period = f"{budget_month.selected_key} {budget_year.value}"
+
+    _stats = mo.hstack([
+        mo.stat(
+            value=to_money_str(_total_spent),
+            label="Total Monthly Expenses",
+        ),
+        mo.stat(
+            value=to_money_str(_assigned), 
+            label="Total Budgeted", 
+        ),
+        mo.stat(
+            value=to_money_str(_to_budget),
+            label="To Budget",
+            direction="increase" if _to_budget >= 0 else "decrease",
+        ),
+    ])
+
+    _warning = (
+        mo.md(f"Over-assigned by **{to_money_str(-_to_budget)}**: the pool is negative, "
+              "so there is no To Budget slice.").callout("warn")
+        if _to_budget < 0 else mo.md("")
+    )
+
+    reports = mo.vstack([
+        mo.md(f"# Report for {_period}"),
+        mo.md("---"),
+        _stats.left(),
+        _warning,
+        mo.md("## Budgeted"),
+        _pie(
+            _budgeted_items,
+            to_money_str(_pool),
+            "available"
+        ),
+        mo.md("## Expenses"),
+        _pie(
+            _spent_items,
+            to_money_str(_total_spent), 
+            "spent"
+        ),
+    ])
+    reports
     return
 
 
