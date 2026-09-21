@@ -5,11 +5,14 @@
 </picture>
 
 
-**Kombuget** is local-only, personal finance app built on top of [marimo](https://github.com/marimo-team/marimo).
+**Kombudget** is a local-only, personal finance app built on top of [marimo](https://github.com/marimo-team/marimo).
 
 ---
 
 ## Features
+
+**Accounts**
+- Track transactions from checking, credit, and liability accounts
 
 **Transactions**
 - Import CSVs from various institutions
@@ -21,6 +24,8 @@
 - Implement envelope budgeting with rollovers to the next month
 - Set a budget start date to skip past transactions
 
+**Reports**
+- Monthly breakdown of expenses and budgeted categories
 ---
 
 ## Disclaimer & Trademarks
