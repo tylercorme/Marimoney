@@ -818,7 +818,7 @@ def _(
                 },
                 on_change=lambda v: update_confirmed_transactions(None)
             ) if num_transactions_need_review else confirmed_transaction_view,
-            sum(t["Amount"] for t in transaction_table.value)
+            f'Sum: {sum(t["Amount"] for t in transaction_table.value)}' if transaction_table.value else ""
         ]
     )
 
