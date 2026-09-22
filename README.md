@@ -6,6 +6,7 @@
 
 
 **Kombudget** is a local-only, personal finance app built on top of [marimo](https://github.com/marimo-team/marimo).
+[View the Demo](https://tylercorme.github.io/kombudget/)
 
 ---
 
