@@ -4,9 +4,11 @@
   <img alt="kombudget" src="docs/static/kombudget-banner-light.svg" width="100%">
 </picture>
 
+**Kombudget** is an envelope budgeting app — assign every dollar to a category, then track spending against it.
 
-**Kombudget** is a local-only, personal finance app built on top of [marimo](https://github.com/marimo-team/marimo).
-[View the Demo](https://tylercorme.github.io/kombudget/)
+[View the Demo](https://tylercorme.github.io/kombudget/) — runs in-browser, seeded with example data.
+
+> built with [marimo](https://github.com/marimo-team/marimo).
 
 ---
 
