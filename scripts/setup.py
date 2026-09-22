@@ -1,5 +1,6 @@
 import sqlite3
 from config import DB_PATH
+import sys
 
 
 def create_tables(conn: sqlite3.Connection):
@@ -55,6 +56,14 @@ def create_tables(conn: sqlite3.Connection):
 
 
 def get_connection() -> sqlite3.Connection:
+    if sys.platform == "emscripten":
+        conn = sqlite3.connect(":memory")
+        create_tables(conn)
+        from seed import seed_demo_data
+        seed_demo_data(conn)
+        return conn
+
+
     conn = sqlite3.connect(DB_PATH)
     create_tables(conn)
     return conn

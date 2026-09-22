@@ -1,3 +1,11 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "marimo",
+#     "plotly==5.24.1",
+# ]
+# ///
+
 import marimo
 
 __generated_with = "0.24.2"
@@ -9,8 +17,6 @@ def _():
     import marimo as mo
     from datetime import datetime, timedelta, date
     from traceback import TracebackException
-    from collections import Counter
-    import json
 
     from importlib import reload
     import transactions
@@ -592,7 +598,7 @@ def _(
             mo.md("**Category**"),
             mo.md("**Amount**"),
         ],
-        widths="equal"
+        widths = [1, 1, 1, 2, 1, 1],
     )
 
 
@@ -609,7 +615,7 @@ def _(
             bulk_edit_category,
             mo.ui.number(disabled=True),
         ],
-        widths="equal"
+        widths=[1,1,1,2,1,1],
     )
 
     unconfirmed_transaction_fields = [
@@ -640,7 +646,7 @@ def _(
                 value=float(_amount/100.0),
             ),
             ],
-            widths="equal",
+            widths=[1,1,1,2,1,1],
         ) for _id, _date, _account_name, _transfer, _notes, _category, _amount in _transactions
     ]
     return (
@@ -1286,8 +1292,7 @@ def _(budget_month, budget_year, mo, monthly_budget):
     ])
 
     _warning = (
-        mo.md(f"Over-assigned by **{to_money_str(-_to_budget)}**: the pool is negative, "
-              "so there is no To Budget slice.").callout("warn")
+        mo.md(f"Over-assigned by **{to_money_str(-_to_budget)}**").callout("warn")
         if _to_budget < 0 else mo.md("")
     )
 

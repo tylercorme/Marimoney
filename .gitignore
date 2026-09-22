@@ -5,3 +5,4 @@ __marimo__/
 __pycache__/
 data/
 budget.db
+dist/
