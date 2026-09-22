@@ -31,7 +31,7 @@ jobs:
 
       - name: Export notebook to WebAssembly HTML
         run: |
-          uv tool run marimo export html-wasm notebook.py -o dist --mode run
+          uv tool run marimo export html-wasm scripts/main.py -o dist --mode run
 
       # Prevent GitHub Pages from running Jekyll over the export (it would
       # otherwise ignore files/folders starting with an underscore).
